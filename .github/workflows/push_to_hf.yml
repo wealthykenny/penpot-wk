@@ -45,7 +45,8 @@ jobs:
             echo "No files >10MB detected; skipping LFS migrate."
           fi
 
-      - name: ":sparkles: add github to hf sync"
+      - name: :sparkles: Add github to hf sync
+
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           HF_SPACE: ${{ secrets.HF_SPACE }}
