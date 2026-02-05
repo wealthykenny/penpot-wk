@@ -1,337 +1,60 @@
-name: "CI"
-
-defaults:
-  run:
-    shell: bash
+name: Push repo to Hugging Face Space
 
 on:
-  pull_request:
-    types:
-      - opened
-      - synchronize
-  push:
-    branches:
-      - develop
-      - staging
-
-concurrency:
-  group: ${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  workflow_dispatch: {}
 
 jobs:
-  lint:
-    name: "Linter"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
+  sync:
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
+      - name: Checkout (full history)
         uses: actions/checkout@v4
-
-      - name: Check clojure code format
-        run: |
-          ./scripts/lint
-
-  test-common:
-    name: "Common Tests"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run tests on JVM
-        working-directory: ./common
-        run: |
-          clojure -M:dev:test
-
-      - name: Run tests on NODE
-        working-directory: ./common
-        run: |
-          ./scripts/test
-
-  test-plugins:
-    name: Plugins Runtime Linter & Tests
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node
-        id: setup-node
-        uses: actions/setup-node@v6
         with:
-          node-version-file: .nvmrc
+          fetch-depth: 0
 
-      - name: Install deps
-        working-directory: ./plugins
-        shell: bash
+      - name: Install git-lfs
         run: |
-          corepack enable;
-          corepack install;
-          pnpm install;
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
 
-      - name: Run Lint
-        working-directory: ./plugins
-        run: pnpm run lint
-
-      - name: Run Format Check
-        working-directory: ./plugins
-        run: pnpm run format:check
-
-      - name: Run Test
-        working-directory: ./plugins
-        run: pnpm run test
-
-      - name: Build runtime
-        working-directory: ./plugins
-        run: pnpm run build
-
-      - name: Build plugins
-        working-directory: ./plugins
-        run: pnpm run build:plugins
-
-      - name: Build styles
-        working-directory: ./plugins
-        run: pnpm run build:styles-example
-
-  test-frontend:
-    name: "Frontend Tests"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Unit Tests
-        working-directory: ./frontend
+      - name: Configure git identity
         run: |
-          ./scripts/test
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
 
-      - name: Component Tests
-        working-directory: ./frontend
+      # Track common large/binary assets with LFS (safe defaults)
+      - name: Track large files with LFS patterns
+        run: |
+          git lfs track "*.zip" "*.tar" "*.tar.gz" "*.7z" || true
+          git lfs track "*.bin" "*.pt" "*.ckpt" "*.safetensors" "*.gguf" || true
+          git lfs track "*.png" "*.jpg" "*.jpeg" "*.mp4" || true
+
+          # Commit .gitattributes if it changed
+          if [ -f .gitattributes ]; then
+            git add .gitattributes
+            git commit -m "chore: configure git-lfs" || true
+          fi
+
+      # If big files are already in history, migrate them into LFS
+      - name: Migrate history to LFS (only if files > 10MB exist)
+        run: |
+          if find . -type f -size +10M | head -n 1 | grep -q .; then
+            git lfs migrate import --everything
+          else
+            echo "No files >10MB detected; skipping LFS migrate."
+          fi
+
+      - name: Push to Hugging Face Space
         env:
-          VITEST_BROWSER_TIMEOUT: 120000
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          HF_SPACE: ${{ secrets.HF_SPACE }}
         run: |
-          ./scripts/test-components
+          HF_REMOTE="https://user:${HF_TOKEN}@huggingface.co/spaces/${HF_SPACE}.git"
 
-  test-render-wasm:
-    name: "Render WASM Tests"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
+          git remote remove hf 2>/dev/null || true
+          git remote add hf "$HF_REMOTE"
 
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Format
-        working-directory: ./render-wasm
-        run: |
-          cargo fmt --check
-
-      - name: Lint
-        working-directory: ./render-wasm
-        run: |
-          ./lint
-
-      - name: Test
-        working-directory: ./render-wasm
-        run: |
-          ./test
-
-  test-backend:
-    name: "Backend Tests"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    services:
-      postgres:
-        image: postgres:17
-        # Provide the password for postgres
-        env:
-          POSTGRES_USER: penpot_test
-          POSTGRES_PASSWORD: penpot_test
-          POSTGRES_DB: penpot_test
-
-        # Set health checks to wait until postgres has started
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-
-      redis:
-        image: valkey/valkey:9
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run tests
-        working-directory: ./backend
-        env:
-          PENPOT_TEST_DATABASE_URI: "postgresql://postgres/penpot_test"
-          PENPOT_TEST_DATABASE_USERNAME: penpot_test
-          PENPOT_TEST_DATABASE_PASSWORD: penpot_test
-          PENPOT_TEST_REDIS_URI: "redis://redis/1"
-
-        run: |
-          clojure -M:dev:test --reporter kaocha.report/documentation
-
-  test-library:
-    name: "Library Tests"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Run tests
-        working-directory: ./library
-        run: |
-          ./scripts/test
-
-  build-integration:
-    name: "Build Integration Bundle"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Build Bundle
-        working-directory: ./frontend
-        run: |
-          ./scripts/build 0.0.0
-
-      - name: Store Bundle Cache
-        uses: actions/cache@v4
-        with:
-          key: "integration-bundle-${{ github.sha }}"
-          path: frontend/resources/public
-
-
-  test-integration-1:
-    name: "Integration Tests 1/4"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-    needs: build-integration
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Restore Cache
-        uses: actions/cache/restore@v4
-        with:
-          key: "integration-bundle-${{ github.sha }}"
-          path: frontend/resources/public
-
-      - name: Run Tests
-        working-directory: ./frontend
-        run: |
-          ./scripts/test-e2e --shard="1/4";
-
-      - name: Upload test result
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-tests-result-1
-          path: frontend/test-results/
-          overwrite: true
-          retention-days: 3
-
-  test-integration-2:
-    name: "Integration Tests 2/4"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-    needs: build-integration
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Restore Cache
-        uses: actions/cache/restore@v4
-        with:
-          key: "integration-bundle-${{ github.sha }}"
-          path: frontend/resources/public
-
-      - name: Run Tests
-        working-directory: ./frontend
-        run: |
-          ./scripts/test-e2e --shard="2/4";
-
-      - name: Upload test result
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-tests-result-2
-          path: frontend/test-results/
-          overwrite: true
-          retention-days: 3
-
-  test-integration-3:
-    name: "Integration Tests 3/4"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-    needs: build-integration
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Restore Cache
-        uses: actions/cache/restore@v4
-        with:
-          key: "integration-bundle-${{ github.sha }}"
-          path: frontend/resources/public
-
-      - name: Run Tests
-        working-directory: ./frontend
-        run: |
-          ./scripts/test-e2e --shard="3/4";
-
-      - name: Upload test result
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-tests-result-3
-          path: frontend/test-results/
-          overwrite: true
-          retention-days: 3
-
-  test-integration-4:
-    name: "Integration Tests 4/4"
-    runs-on: penpot-runner-02
-    container: penpotapp/devenv:latest
-    needs: build-integration
-
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-
-      - name: Restore Cache
-        uses: actions/cache/restore@v4
-        with:
-          key: "integration-bundle-${{ github.sha }}"
-          path: frontend/resources/public
-
-      - name: Run Tests
-        working-directory: ./frontend
-        run: |
-          ./scripts/test-e2e --shard="4/4";
-
-      - name: Upload test result
-        uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: integration-tests-result-4
-          path: frontend/test-results/
-          overwrite: true
-          retention-days: 3
+          # Force push because LFS migrate rewrites history
+          git push hf --force --all
+          git push hf --force --tags
